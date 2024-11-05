@@ -122,13 +122,17 @@ public class JsonExtracterUtil {
 
     private  void processItemsArray(JsonParser jsonParser,MongoCollection<Document> collection,ExtracterType extracterType,int docNumber) throws IOException {
         int processedNumber = 0;
-        while (jsonParser.nextToken() != JsonToken.END_ARRAY || (processedNumber != docNumber && docNumber > 0)) {
+        
+        while (jsonParser.nextToken() != JsonToken.END_ARRAY && ((processedNumber < docNumber) && docNumber > 0)) {
             if (jsonParser.currentToken() == JsonToken.START_OBJECT) {
                 insertJsonObject(jsonParser, objectMapper, collection,extracterType);
+                 System.out.println("Proccessed document number : " + processedNumber);
+                 System.out.println("Max doc number is: " + docNumber);
+                processedNumber++;
             } else {
                 jsonParser.skipChildren();
             }
-            processedNumber++;
+
         }
     }
 

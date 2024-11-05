@@ -4,9 +4,8 @@
  * and open the template in the editor.
  */
 package com.mongoiswriter;
-
-import java.util.Collections;
 import org.springframework.boot.SpringApplication;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.scheduling.annotation.EnableAsync;
@@ -21,8 +20,8 @@ import org.springframework.scheduling.annotation.EnableAsync;
 public class Main {
     public static void main(String[] args){
         SpringApplication app = new SpringApplication(Main.class);
-        app.setDefaultProperties(Collections
-          .singletonMap("server.port", "9090"));
+        app.setWebApplicationType(WebApplicationType.NONE);
         app.run(args);
+        
     }
 }
