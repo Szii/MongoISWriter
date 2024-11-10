@@ -31,6 +31,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.logging.Level;
 import java.util.stream.Collectors;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.stereotype.Service;
@@ -93,10 +94,11 @@ public class MongoSetupService {
             MongoCollection<Document> zneniCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL);
             MongoCollection<Document> zneniPravniAktCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_ZNENI);
     
-        
+            transferNewestDocuments(zneniPravniAktCollection,zneniCollection);
             
          //  processTerminDocuments(terminyProcessedCollection,terminyBaseCollection,terminyVazbaCollection,terminyPopisCollection); 
-            processZneniDocuments(zneniCollection,zneniPravniAktCollection,terminyProcessedCollection); 
+         
+          //  processZneniDocuments(zneniCollection,zneniPravniAktCollection,terminyProcessedCollection); 
             mongoUtils.setProcessing(false);
         
     }
@@ -121,7 +123,6 @@ public class MongoSetupService {
                 }
             }
 
-            // Wait for all initial tasks to complete
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
         } catch (Exception e) {
@@ -131,113 +132,67 @@ public class MongoSetupService {
         }
     }
     
-    
-    private void processZneniDocuments(MongoCollection<Document> targetCollection, 
-            MongoCollection<Document> pravniAktCollection, MongoCollection<Document> terminyCollection){
-        ExecutorService executorService = Executors.newFixedThreadPool(processingConfig.THREAD_NUMBER);
-
-        try{
-             List<CompletableFuture<Void>> futures = new ArrayList<>();
-            try (MongoCursor<Document> cursor = pravniAktCollection.find().iterator()) {
-                while (cursor.hasNext()) {
-                    Document doc = cursor.next();
-                     CompletableFuture<Void> future = CompletableFuture.runAsync(() ->
-                            processZneniDocument(doc, targetCollection,terminyCollection), executorService);
-                    futures.add(future);
-                }
-            }
-
-            // Wait for all initial tasks to complete
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-        } catch (Exception e) {
-            logger.error("An error occurred: {}", e.getMessage());
-        } finally {
-            executorService.shutdown();
-        }
+    public void startTransfer(Set<Integer> uniqueIds,MongoCollection<Document> sourceCollection, MongoCollection<Document> targetCollection) throws InterruptedException {
+        ExecutorService executor = Executors.newFixedThreadPool(processingConfig.THREAD_NUMBER);
+        uniqueIds.forEach(dokumentId -> {
+            executor.submit(() -> processDocument(dokumentId,sourceCollection,targetCollection));
+        });
+        executor.shutdown();
+        executor.awaitTermination(6, TimeUnit.HOURS);
     }
-
-
-    private void processZneniDocument(Document doc,
-                                       MongoCollection<Document> targetCollection, MongoCollection<Document> terminyCollection ) {
         
-        
-        try {
+    private void processDocument(Integer dokumentId,MongoCollection<Document> sourceCollection, MongoCollection<Document> targetCollection) {
+        Document doc = sourceCollection.find(Filters.eq("znění-base-id", dokumentId))
+                .sort(Sorts.descending("znění-datum-účinnosti-od"))
+                .first();
+
+        if (doc != null) {
             Integer zneniDokumentId = getInteger(doc, "znění-dokument-id");
-         
             Integer zneniBaseId = getInteger(doc, "znění-base-id");
             String aktNazevVyhlasen = doc.getString("akt-název-vyhlášený");
             String cisEsbTypZneniPolozka = doc.getString("cis-esb-typ-znění-položka");
             String zneniDatumUcinnostiOdStr = doc.getString("znění-datum-účinnosti-od");
             String aktCitace = doc.getString("akt-citace");
             Segments sbirka = segmentsExtractionUtil.extractSegments(doc.getString("akt-iri"));
-            
+
             Document typDoc = (Document) doc.get("cis-esb-podtyp-právní-akt");
-            if(typDoc == null){
-                logger.debug("-----------------------------------------------");
-            }
-            else{
-                logger.debug("{}",typDoc.getString("iri"));
-            }
+
             String podTypAktu = null;
-            if(typDoc.getString("iri") != null){
-                  podTypAktu = stringParser.extractAfterLastSlashAsString(typDoc.getString("iri"));
+            if (typDoc != null && typDoc.getString("iri") != null) {
+                podTypAktu = stringParser.extractAfterLastSlashAsString(typDoc.getString("iri"));
             }
-            
-        //    List<VztazenyTermin> vztazeneTerminy = getListOfTermsForDocument(doc,terminyCollection,"znění-dokument-id");
-           List<VztazenyTermin> vztazeneTerminy = null;
-            /*
-            if (zneniDokumentId == null || zneniBaseId == null || aktNazevVyhlasen == null || zneniDatumUcinnostiOdStr == null) {
-                logger.warn("Skipping document due to missing fields: {}", doc.toJson());
-                return;
-            }
+            List<VztazenyTermin> vztazeneTerminy = null;
 
-            Date zneniDatumUcinnostiOd = parseDate(zneniDatumUcinnostiOdStr);
-            if (zneniDatumUcinnostiOd == null) {
-                logger.warn("Invalid date format in 'znění-datum-účinnosti-od': {}", zneniDatumUcinnostiOdStr);
-                return;
-            }
-            */
-           
-
-            // Fetch IDs
             String pdfId = fetchIdWithRetry(zneniDokumentId, "PDF");
             String docxId = fetchIdWithRetry(zneniDokumentId, "DOCX");
-            // Create new document with "puvodni-verze" set to true
+
             Document newDoc = createZneniDocument(zneniDokumentId, zneniBaseId, aktNazevVyhlasen,
-                    cisEsbTypZneniPolozka, zneniDatumUcinnostiOdStr, pdfId, docxId,sbirka.getTypSbirky(),podTypAktu,sbirka.getCisloAktu(),aktCitace,vztazeneTerminy);
-            
-            if(zneniBaseId.equals(zneniDokumentId)){
-                 newDoc.append("původní-verze", true);
-            }
-
-            else{
-                newDoc.append("původní-verze", false);
-            }
-            Date zneniDatumUcinnostiOd = parseDate(zneniDatumUcinnostiOdStr);
-            Document docToUpdate =  getNewerVersionOfDocument(targetCollection, zneniBaseId, zneniDatumUcinnostiOd,"znění-base-id",doc);
-            
-
-            if (docToUpdate != null) {
-                if(docToUpdate == doc){
-                    UpdateResult result = targetCollection.replaceOne(Filters.eq("znění-base-id", docToUpdate.getInteger("znění-base-id")), newDoc);
-                    if(result.getModifiedCount() == 0){
-                        throw new RuntimeException("Failed to update document " + docToUpdate.toJson() + "with " + newDoc.toJson());
-                    }
-                
-                }
-            }
-            else{
-                targetCollection.insertOne(newDoc);
-            }
-              
-
-        } catch (IllegalArgumentException e) {
-            logger.error("Failed to process document: {}", e.getMessage());
-
+                    cisEsbTypZneniPolozka, zneniDatumUcinnostiOdStr, pdfId, docxId,
+                    sbirka.getTypSbirky(), podTypAktu, sbirka.getCisloAktu(), aktCitace, vztazeneTerminy);
+        
+            targetCollection.insertOne(newDoc);
         }
     }
+
     
+     public void transferNewestDocuments(MongoCollection<Document> sourceCollection, MongoCollection<Document> targetCollection) {
+        Set<Integer> uniqueIds = new HashSet<>();
+        try (MongoCursor<Document> cursor = sourceCollection.find().iterator()) {
+            while (cursor.hasNext()) {
+                Document doc = cursor.next();
+                Integer dokumentId = doc.getInteger("znění-base-id");
+                if (dokumentId != null) {
+                    uniqueIds.add(dokumentId);
+                }
+            }
+        }
+        try {
+            startTransfer(uniqueIds,sourceCollection,targetCollection);
+        } catch (InterruptedException ex) {
+            java.util.logging.Logger.getLogger(MongoSetupService.class.getName()).log(Level.SEVERE, null, ex);
+        }                        
+    }
+
         private void processTerminDocument(Document docVazba,
                                        MongoCollection<Document> targetCollection,
                                        MongoCollection<Document> terminBaseCollection, MongoCollection<Document> terminDefiniceCollection
@@ -341,31 +296,7 @@ public class MongoSetupService {
                                       .append("termin-popis", termin.getVztazenyTerminText()))
                 .collect(Collectors.toList());
     }
-
-
-    private Document getNewerVersionOfDocument(MongoCollection<Document> targetCollection,
-                                                 Integer zneniBaseId, Date newDate,String idName,Document doc) {
-        // Fetch the existing document with "puvodni-verze": true
-        
-        Document existingDoc = targetCollection.find(Filters.and(
-                Filters.eq(idName, zneniBaseId)
-        )).first();
-        if(existingDoc == null ){
-            return null;
-        }
-        else{
-             logger.debug(existingDoc.toJson()); 
-        }
-           
-            String existingDateStr = existingDoc.getString("znění-datum-účinnosti-od");
-            Date existingDate = parseDate(existingDateStr);
-            if (existingDate != null && existingDate.before(newDate)) {
-                return doc; 
-                
-            }
-        return existingDoc;
-    }
-
+    
     private String fetchIdWithRetry(Integer zneniDokumentId, String format) {
         String cachedId = format.equals("PDF") ? PDF_ID_CACHE.get(zneniDokumentId) : DOCX_ID_CACHE.get(zneniDokumentId);
         if (cachedId != null) {
