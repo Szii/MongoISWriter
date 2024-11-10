@@ -12,4 +12,4 @@ RUN mvn package -DskipTests
 
 # EXPOSE <PORT>
 
-CMD ["java", "-jar", "target/app.jar"]
+CMD ["java", "-jar", "target/MongoISWriter-1.0-SNAPSHOT.jar"]
