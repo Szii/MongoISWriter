@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mongodb.client.*;
 import com.mongodb.client.model.*;
 import com.mongodb.client.result.UpdateResult;
+import com.mongoiswriter.Configuration.DataSourceConfig;
 import com.mongoiswriter.Configuration.MongoConfig;
 import com.mongoiswriter.Configuration.ProcessConfig;
 import com.mongoiswriter.Enum.VztazenyTermin;
@@ -60,14 +61,16 @@ public class MongoSetupService {
     private final DocumentFetcher documentFetcher;
     private final MongoConfig mongoConfig;
     private final ProcessConfig processingConfig;
-
-    public MongoSetupService(MongoUtils mongoUtils, StringParser stringParser, SegmentsExtractionUtil segmentsExtractionUtil, DocumentFetcher documentFetcher, MongoConfig mongoConfig, ProcessConfig processingConfig) {
+    private final DataSourceConfig dataSourceConfig;
+    
+    public MongoSetupService(MongoUtils mongoUtils, StringParser stringParser, SegmentsExtractionUtil segmentsExtractionUtil, DocumentFetcher documentFetcher, MongoConfig mongoConfig, ProcessConfig processingConfig,DataSourceConfig dataSourceConfig) {
         this.mongoUtils = mongoUtils;
         this.stringParser = stringParser;
         this.segmentsExtractionUtil = segmentsExtractionUtil;
         this.documentFetcher = documentFetcher ; 
         this.mongoConfig = mongoConfig;
         this.processingConfig = processingConfig;
+        this.dataSourceConfig = dataSourceConfig;
     }
     
     public void setupMongo() throws MalformedURLException, SocketException {
@@ -178,11 +181,13 @@ public class MongoSetupService {
      public void transferNewestDocuments(MongoCollection<Document> sourceCollection, MongoCollection<Document> targetCollection) {
         Set<Integer> uniqueIds = new HashSet<>();
         try (MongoCursor<Document> cursor = sourceCollection.find().iterator()) {
-            while (cursor.hasNext()) {
+            int idCount = 0;
+            while (cursor.hasNext() && (idCount <= dataSourceConfig.DOCUMENTS_NUMBER)) {
                 Document doc = cursor.next();
                 Integer dokumentId = doc.getInteger("znění-base-id");
                 if (dokumentId != null) {
                     uniqueIds.add(dokumentId);
+                    idCount++;
                 }
             }
         }
