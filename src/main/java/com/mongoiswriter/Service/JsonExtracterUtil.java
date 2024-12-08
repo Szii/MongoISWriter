@@ -58,7 +58,7 @@ public class JsonExtracterUtil {
            this.objectMapper = objectMapper;
        }
 
-    public  void extractFromAddressToMongo(String sourceURL, String collectionName,ExtracterType extracterType, int docNumber)throws MalformedURLException, SocketException {  
+    public  void extractFromAddressToMongo(String sourceURL, String collectionName,ExtracterType extracterType)throws MalformedURLException, SocketException {  
         JsonFactory jsonFactory = new JsonFactory();
 
         // Create MongoDB client
@@ -80,7 +80,7 @@ public class JsonExtracterUtil {
 
                 if (token == JsonToken.START_OBJECT) {
                     // Process the root object
-                    processRootObject(jsonParser,collection,extracterType,docNumber);
+                    processRootObject(jsonParser,collection,extracterType);
                 } else {
                     throw new IOException("Expected data to start with an Object");
                 }
@@ -104,7 +104,7 @@ public class JsonExtracterUtil {
 
     }
 
-    private void processRootObject(JsonParser jsonParser, MongoCollection<Document> collection,ExtracterType extracterType,int docNumber) throws IOException {
+    private void processRootObject(JsonParser jsonParser, MongoCollection<Document> collection,ExtracterType extracterType) throws IOException {
         // Iterate over the fields of the root object
         while (jsonParser.nextToken() != JsonToken.END_OBJECT) {
             String fieldName = jsonParser.getCurrentName();
@@ -112,7 +112,7 @@ public class JsonExtracterUtil {
 
             if ("položky".equals(fieldName) && jsonParser.currentToken() == JsonToken.START_ARRAY) {
                 // Process the "položky" array
-                processItemsArray(jsonParser, collection,extracterType,docNumber);
+                processItemsArray(jsonParser, collection,extracterType);
             } else {
                 // Skip other fields
                 jsonParser.skipChildren();
@@ -120,14 +120,13 @@ public class JsonExtracterUtil {
         }
     }
 
-    private  void processItemsArray(JsonParser jsonParser,MongoCollection<Document> collection,ExtracterType extracterType,int docNumber) throws IOException {
+    private  void processItemsArray(JsonParser jsonParser,MongoCollection<Document> collection,ExtracterType extracterType) throws IOException {
         int processedNumber = 0;
         
-        while (jsonParser.nextToken() != JsonToken.END_ARRAY && ((processedNumber < docNumber) && docNumber > 0)) {
+        while (jsonParser.nextToken() != JsonToken.END_ARRAY) {
             if (jsonParser.currentToken() == JsonToken.START_OBJECT) {
                 insertJsonObject(jsonParser, objectMapper, collection,extracterType);
-                 System.out.println("Proccessed document number : " + processedNumber);
-                 System.out.println("Max doc number is: " + docNumber);
+                System.out.println("Proccessed document number : " + processedNumber);
                 processedNumber++;
             } else {
                 jsonParser.skipChildren();
