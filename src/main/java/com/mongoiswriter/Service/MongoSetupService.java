@@ -80,7 +80,7 @@ public class MongoSetupService {
         
             mongoUtils.setProcessing(true);
                   setRelationsForCollection();
-                  /*
+                  
             try{
                 
                 jsonExtracterUtil.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_ZNENI,mongoConfig.MONGO_COLLECTION_AKTY_ZNENI,ExtracterType.PRAVNI_AKT);
@@ -94,7 +94,7 @@ public class MongoSetupService {
                 transferNewestDocuments(zneniPravniAktCollection,zneniCollection);
                 
                 jsonExtracterUtil.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_VAZBA,mongoConfig.MONGO_COLLECTION_AKTY_VAZBA,ExtracterType.PRAVNI_AKT_VAZBA);
-
+                setRelationsForCollection();
           
             }
             catch(SocketException e){
@@ -103,7 +103,7 @@ public class MongoSetupService {
             catch(MalformedURLException e){
                 throw new MalformedURLException("URL exception. URL is not correct");
             }
-*/
+
             mongoUtils.setProcessing(false);
         
     }
