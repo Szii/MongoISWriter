@@ -59,17 +59,15 @@ public class MongoSetupService {
     private final MongoUtils mongoUtils;
     private final StringParser stringParser;
     private final SegmentsExtractionUtil segmentsExtractionUtil;
-    private final DocumentFetcher documentFetcher;
     private final MongoConfig mongoConfig;
     private final ProcessConfig processingConfig;
     private final DataSourceConfig dataSourceConfig;
     private final JsonExtracterUtil jsonExtracterUtil;
     
-    public MongoSetupService(MongoUtils mongoUtils, StringParser stringParser, SegmentsExtractionUtil segmentsExtractionUtil, DocumentFetcher documentFetcher, MongoConfig mongoConfig, ProcessConfig processingConfig,DataSourceConfig dataSourceConfig,JsonExtracterUtil jsonExtracterUtil) {
+    public MongoSetupService(MongoUtils mongoUtils, StringParser stringParser, SegmentsExtractionUtil segmentsExtractionUtil, MongoConfig mongoConfig, ProcessConfig processingConfig,DataSourceConfig dataSourceConfig,JsonExtracterUtil jsonExtracterUtil) {
         this.mongoUtils = mongoUtils;
         this.stringParser = stringParser;
         this.segmentsExtractionUtil = segmentsExtractionUtil;
-        this.documentFetcher = documentFetcher ; 
         this.mongoConfig = mongoConfig;
         this.processingConfig = processingConfig;
         this.dataSourceConfig = dataSourceConfig;
@@ -78,9 +76,7 @@ public class MongoSetupService {
     
     public void setupMongo() throws MalformedURLException, SocketException, IOException {
         
-            mongoUtils.setProcessing(true);
-                  setRelationsForCollection();
-                  
+            mongoUtils.setProcessing(true);              
             try{
                 
                 jsonExtracterUtil.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_ZNENI,mongoConfig.MONGO_COLLECTION_AKTY_ZNENI,ExtracterType.PRAVNI_AKT);
@@ -94,8 +90,9 @@ public class MongoSetupService {
                 transferNewestDocuments(zneniPravniAktCollection,zneniCollection);
                 
                 jsonExtracterUtil.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_VAZBA,mongoConfig.MONGO_COLLECTION_AKTY_VAZBA,ExtracterType.PRAVNI_AKT_VAZBA);
+ 
                 setRelationsForCollection();
-          
+         
             }
             catch(SocketException e){
                 throw new SocketException("Socket exception. Cannot open socket");
@@ -103,7 +100,6 @@ public class MongoSetupService {
             catch(MalformedURLException e){
                 throw new MalformedURLException("URL exception. URL is not correct");
             }
-
             mongoUtils.setProcessing(false);
         
     }
@@ -187,74 +183,95 @@ public class MongoSetupService {
         MongoCollection<Document> collection1 = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL);
         MongoCollection<Document> collection2 = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_VAZBA);
 
+        // Ensure indexes (Ideally do this once in a setup step, not every time)
+        collection1.createIndex(Indexes.ascending("znění-dokument-id"));
+        collection2.createIndex(Indexes.ascending("znění-cíl-dokument-id"));
+        collection2.createIndex(Indexes.ascending("znění-fragment-zdroj.znění-dokument-id"));
+
         try {
-            System.out.println("Size: " + collection1.countDocuments());
+            List<WriteModel<Document>> updatesForOdkazovanV = new ArrayList<>();
+            List<WriteModel<Document>> updatesForOdkazujeNa = new ArrayList<>();
 
-            // Create a fixed thread pool for parallel processing
-            ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+            int docCount = 0;
+            long totalDocs = collection1.countDocuments();
+            System.out.println("Size: " + totalDocs);
 
-            // Use batching to process multiple documents at once
-            int batchSize = 100; // Adjust batch size based on available memory and workload
-            Set<Document> batch = new HashSet<>(batchSize);
-
+            // Iterate over all documents from collection1
+            // If you only need "znění-dokument-id", you can use a projection:
+            // for (Document doc1 : collection1.find().projection(Projections.include("znění-dokument-id"))) {
             for (Document doc1 : collection1.find()) {
-                batch.add(doc1);
-                if (batch.size() >= batchSize) {
-                    Set<Document> batchCopy = new HashSet<>(batch);
-                    batch.clear();
-                    executor.submit(() -> processBatch(batchCopy, collection1, collection2));
+                Integer dokumentId = doc1.getInteger("znění-dokument-id");
+                if (dokumentId == null) {
+                    continue; // Skip if no dokumentId found
                 }
+
+                System.out.println("Processing doc: " + dokumentId);
+
+                Set<Document> matchingIds1 = new HashSet<>();
+                Set<Document> matchingIds2 = new HashSet<>();
+
+                // Fetch documents from collection2 where "znění-cíl-dokument-id" = dokumentId
+                // Use projection to only retrieve needed fields
+                collection2.find(Filters.eq("znění-cíl-dokument-id", dokumentId))
+                    .projection(Projections.include("znění-fragment-zdroj.znění-dokument-id"))
+                    .forEach(doc2 -> {
+                        Document fragmentZdroj = doc2.get("znění-fragment-zdroj", Document.class);
+                        if (fragmentZdroj != null) {
+                            Integer sourceId = fragmentZdroj.getInteger("znění-dokument-id");
+                            if (sourceId != null) {
+                                matchingIds1.add(new Document("znění-dokument-id", sourceId));
+                            }
+                        }
+                    });
+
+                // Fetch documents from collection2 where "znění-fragment-zdroj.znění-dokument-id" = dokumentId
+                collection2.find(Filters.eq("znění-fragment-zdroj.znění-dokument-id", dokumentId))
+                    .projection(Projections.include("znění-cíl-dokument-id"))
+                    .forEach(doc2 -> {
+                        Integer targetId = doc2.getInteger("znění-cíl-dokument-id");
+                        if (targetId != null) {
+                            matchingIds2.add(new Document("znění-cíl-dokument-id", targetId));
+                        }
+                    });
+
+                // Accumulate updates for bulkWrite
+                updatesForOdkazovanV.add(
+                    new UpdateOneModel<>(
+                        Filters.eq("znění-dokument-id", dokumentId),
+                        Updates.set("odkazován-v", matchingIds1)
+                    )
+                );
+
+                updatesForOdkazujeNa.add(
+                    new UpdateOneModel<>(
+                        Filters.eq("znění-dokument-id", dokumentId),
+                        Updates.set("odkazuje-na", matchingIds2)
+                    )
+                );
+
+                docCount++;
+
+                // Optionally, write updates in batches to avoid huge memory consumption
+                // if (docCount % 1000 == 0) {
+                //     collection1.bulkWrite(updatesForOdkazovanV);
+                //     collection1.bulkWrite(updatesForOdkazujeNa);
+                //     updatesForOdkazovanV.clear();
+                //     updatesForOdkazujeNa.clear();
+                // }
+
+                System.out.println("Processed document count: " + docCount + "/" + totalDocs);
             }
 
-            // Process any remaining documents in the last batch
-            if (!batch.isEmpty()) {
-                executor.submit(() -> processBatch(batch, collection1, collection2));
+            // After processing all documents, perform the final bulk writes
+            if (!updatesForOdkazovanV.isEmpty()) {
+                collection1.bulkWrite(updatesForOdkazovanV);
+            }
+            if (!updatesForOdkazujeNa.isEmpty()) {
+                collection1.bulkWrite(updatesForOdkazujeNa);
             }
 
-            // Shut down the executor service gracefully
-            executor.shutdown();
-            while (!executor.isTerminated()) {
-                // Wait for all tasks to complete
-            }
-
-            System.out.println("All documents processed.");
         } catch (Exception e) {
             System.err.println("Error: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    private void processBatch(Set<Document> batch, MongoCollection<Document> collection1, MongoCollection<Document> collection2) {
-        try {
-            Map<Integer, Set<Document>> batchUpdates = new HashMap<>();
-
-            // Prepare batch updates
-            for (Document doc1 : batch) {
-                Integer dokumentId = doc1.getInteger("znění-dokument-id");
-                Set<Document> matchingDocs = new HashSet<>();
-
-                // Query the second collection for matching documents
-                collection2.find(Filters.eq("znění-cíl-dokument-id", dokumentId))
-                        .forEach(doc2 -> {
-                            Document fragmentZdroj = doc2.get("znění-fragment-zdroj", Document.class);
-                            if (fragmentZdroj != null) {
-                                Integer zneniDokumentId = fragmentZdroj.getInteger("znění-dokument-id");
-                                matchingDocs.add(new Document("vztažené-znění-dokument-id", zneniDokumentId));
-                            }
-                        });
-
-                batchUpdates.put(dokumentId, matchingDocs);
-            }
-
-            // Perform batch updates
-            for (Map.Entry<Integer, Set<Document>> entry : batchUpdates.entrySet()) {
-                collection1.updateOne(
-                        Filters.eq("znění-dokument-id", entry.getKey()), // Match by "znění-dokument-id"
-                        Updates.set("odkazován-v", entry.getValue())     // Add matching documents
-                );
-            }
-        } catch (Exception e) {
-            System.err.println("Error processing batch: " + e.getMessage());
             e.printStackTrace();
         }
     }

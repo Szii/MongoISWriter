@@ -36,6 +36,7 @@ import java.net.URLConnection;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -71,228 +72,206 @@ public class JsonExtracterUtil {
            this.mongoConfig = mongoConfig;
        }
 
-    public  void extractFromAddressToMongo(String sourceURL, String collectionName,ExtracterType extracterType)throws MalformedURLException, SocketException, IOException {  
+    public void extractFromAddressToMongo(String sourceURL, String collectionName, ExtracterType extracterType)
+            throws MalformedURLException, SocketException, IOException {
         JsonFactory jsonFactory = new JsonFactory();
         mongoUtils.createCollection(collectionName);
         MongoCollection<Document> collection = database.getCollection(collectionName);
-        collection = collection.withWriteConcern(WriteConcern.MAJORITY);            
-        uniqueIds = mongoUtils.getListOfUniqueZnenDokumentIDsForCollection(mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL));
+
+        // Set write concern to something less strict if acceptable
+        collection = collection.withWriteConcern(WriteConcern.ACKNOWLEDGED);
+
+        uniqueIds = mongoUtils.getListOfUniqueZnenDokumentIDsForCollection(
+            mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL)
+        );
+
         URL url = new URL(sourceURL);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod("GET");
-        connection.setConnectTimeout(6000000); // 1 minute
-        connection.setReadTimeout(60000000);  // 10 minutes
-        connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36");
+        connection.setConnectTimeout(6000000); 
+        connection.setReadTimeout(60000000); 
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0");
         connection.setRequestProperty("Accept", "*/*");
         connection.setRequestProperty("Connection", "keep-alive");
         connection.setRequestProperty("Range", "bytes=0-");
+
         try (InputStream urlInputStream = connection.getInputStream();
              BufferedInputStream bufferedInputStream = new BufferedInputStream(urlInputStream, 100 * 1024);
              GZIPInputStream gzipInputStream = new GZIPInputStream(bufferedInputStream);
              JsonParser jsonParser = jsonFactory.createParser(gzipInputStream)) {
 
-                JsonToken token = jsonParser.nextToken();
+            JsonToken token = jsonParser.nextToken();
 
-                if (token == JsonToken.START_OBJECT) {
-                    // Process the root object
-                    processRootObject(jsonParser,collection,extracterType);
-                } else {
-                    throw new IOException("Expected data to start with an Object");
-                }
-                
-
-                System.out.println("Source size" + mongoUtils.getCollectionSize(collectionName));
-                System.out.println("Import completed successfully.");
-
-            } catch (IOException e) {
-                System.out.println("Source size " + mongoUtils.getCollectionSize(collectionName));
-                System.err.println("IOException occurred: " + e.getMessage());
-                mongoUtils.setProcessing(false);
-                e.printStackTrace();
-                
-                throw new SocketException();
-            } catch (MongoException me) {
-                System.err.println("MongoException occurred: " + me.getMessage());
-                me.printStackTrace();
+            if (token == JsonToken.START_OBJECT) {
+                processRootObject(jsonParser, collection, extracterType);
+            } else {
+                throw new IOException("Expected data to start with an Object");
             }
 
+            // Create indexes AFTER data insertion for better performance
+            if (extracterType == ExtracterType.PRAVNI_AKT_VAZBA) {
+                collection.createIndex(Indexes.ascending("znění-cíl-dokument-id"));
+                collection.createIndex(Indexes.ascending("znění-fragment-zdroj.znění-dokument-id"));
+            } else if (extracterType == ExtracterType.PRAVNI_AKT) {
+                collection.createIndex(Indexes.ascending("znění-dokument-id"));
+            }
 
+            System.out.println("Source size: " + mongoUtils.getCollectionSize(collectionName));
+            System.out.println("Import completed successfully.");
+        } catch (IOException e) {
+            System.out.println("Source size: " + mongoUtils.getCollectionSize(collectionName));
+            System.err.println("IOException occurred: " + e.getMessage());
+            mongoUtils.setProcessing(false);
+            e.printStackTrace();
+            throw new SocketException();
+        } catch (MongoException me) {
+            System.err.println("MongoException occurred: " + me.getMessage());
+            me.printStackTrace();
+        }
     }
 
-    private void processRootObject(JsonParser jsonParser, MongoCollection<Document> collection,ExtracterType extracterType) throws IOException {
-        // Iterate over the fields of the root object
+    private void processRootObject(JsonParser jsonParser, MongoCollection<Document> collection, ExtracterType extracterType) throws IOException {
         while (jsonParser.nextToken() != JsonToken.END_OBJECT) {
             String fieldName = jsonParser.getCurrentName();
             jsonParser.nextToken(); // Move to the value
 
             if ("položky".equals(fieldName) && jsonParser.currentToken() == JsonToken.START_ARRAY) {
-                // Process the "položky" array
-                processItemsArray(jsonParser, collection,extracterType);
+                processItemsArray(jsonParser, collection, extracterType);
             } else {
-                // Skip other fields
                 jsonParser.skipChildren();
             }
         }
     }
 
-    private  void processItemsArray(JsonParser jsonParser,MongoCollection<Document> collection,ExtracterType extracterType) throws IOException {
+    private void processItemsArray(JsonParser jsonParser, MongoCollection<Document> collection, ExtracterType extracterType) throws IOException {
         int processedNumber = 0;
-        
+        int batchSize = 1000; // adjust as needed
+        List<Document> batch = new ArrayList<>();
+
         while (jsonParser.nextToken() != JsonToken.END_ARRAY) {
             if (jsonParser.currentToken() == JsonToken.START_OBJECT) {
-                insertJsonObject(jsonParser, objectMapper, collection,extracterType);
-                System.out.println("Proccessed document number : " + processedNumber);
+                Document doc = parseSingleDocument(jsonParser, objectMapper, extracterType, uniqueIds);
+                if (doc != null) {
+                    batch.add(doc);
+                }
+
                 processedNumber++;
+
+                // Insert batch every 1000 documents (or a size you choose)
+                if (batch.size() >= batchSize) {
+                    collection.insertMany(batch);
+                    batch.clear();
+                    System.out.println("Inserted " + processedNumber + " documents so far...");
+                }
             } else {
                 jsonParser.skipChildren();
             }
-
         }
+
+        // Insert any remaining documents
+        if (!batch.isEmpty()) {
+            collection.insertMany(batch);
+            System.out.println("Final insert of remaining " + batch.size() + " documents.");
+        }
+
+        System.out.println("Processed total documents: " + processedNumber);
     }
-
-    private  void insertJsonObject(JsonParser jsonParser, ObjectMapper objectMapper, MongoCollection<Document> collection, ExtracterType extracterType) throws IOException {
-        // Read the JSON object into a tree model
-        JsonNode jsonNode = objectMapper.readTree(jsonParser);
-        
-        
-        if(extracterType == ExtracterType.TERMIN_NAZEV){
-            createIndexes(collection, "termin-id");
-        }
-        
-       if(extracterType == ExtracterType.TERMIN_VAZBA){
-            createIndexes(collection, "termin-id");
-        }
-        
-       if(extracterType == ExtracterType.PRAVNI_AKT){
-            createIndexes(collection, "znění-dokument-id");
-            JsonNode zneniDatumUcinostiDoNode =  jsonNode.get("znění-datum-účinnosti-do");
-            JsonNode zneniDatumUcinostiOdNode =  jsonNode.get("znění-datum-účinnosti-od");
-            JsonNode metadataDatumZruseniNode =  jsonNode.get("metadata-datum-zrušení");
-            LocalDate currentDate = LocalDate.parse(LocalDate.now().toString(),formatter);
-            
-            if(zneniDatumUcinostiOdNode != null){
-                LocalDate zneniDatumUcinostiOd = LocalDate.parse(zneniDatumUcinostiOdNode.asText(),formatter);   
-                     if(zneniDatumUcinostiOd.isAfter(currentDate)){
-                           //  System.out.println("Skipped document due to not null 'znění-datum-účinnosti-do' field. " + zneniDatumUcinostiDoNode);
-                             return;
-                         }
-            }
-            
-            if(zneniDatumUcinostiDoNode != null && !zneniDatumUcinostiDoNode.isNull()){
-                          LocalDate zneniDatumUcinostiDo = LocalDate.parse(zneniDatumUcinostiDoNode.asText(),formatter);   
-                         if(zneniDatumUcinostiDo.isBefore(currentDate)){
-                            // System.out.println("Skipped document due to not null 'znění-datum-účinnosti-do' field. " + zneniDatumUcinostiDoNode);
-                             return;
-                         }
-
-                     }
-            
-            if(metadataDatumZruseniNode != null && !metadataDatumZruseniNode.isNull()){
-                        LocalDate metadataDatumZruseni = LocalDate.parse(metadataDatumZruseniNode.asText(),formatter); 
-                          if(metadataDatumZruseni.isBefore(currentDate)){
-                            //   System.out.println("Skipped document due to not null 'metadata-datum-zrušení' field." + metadataDatumZruseniNode);
-                                return;
-                          }
-                     } 
-            
-        /*    
-       
-            Optional.ofNullable(
-                    collection.find(Filters.eq("znění-base-id", jsonNode.get("znění-base-id").asText()))
-                              .sort(Sorts.descending("znění-datum-účinnosti-od"))
-                              .first()
-            ).ifPresent(doc -> {
-                LocalDate foundDate = LocalDate.parse(doc.getString("znění-datum-účinnosti-od"), formatter);
-                LocalDate newDate = LocalDate.parse(jsonNode.get("znění-datum-účinnosti-od").asText(), formatter);
-
-                if (foundDate.isBefore(newDate)) {
-                    collection.replaceOne(Filters.eq("znění-base-id", doc.getString("znění-base-id")),
-                            Document.parse(jsonNode.toString()));
-                }
-            });
-          */
-       }
-       if(extracterType == ExtracterType.TERMIN_DEFINICE){
-           createIndexes(collection, "definice-termínu-id");
-           LocalDate currentDate = LocalDate.parse(LocalDate.now().toString(),formatter);
-           JsonNode terminPlatnostDoNode =  jsonNode.get("definice-termínu-platnost-vazby-do");
-           /*
-           if(terminPlatnostDoNode != null && !terminPlatnostDoNode.isNull()){
-            LocalDate terminPlatnostDoDate = LocalDate.parse(terminPlatnostDoNode.asText(),formatter);   
-            if(terminPlatnostDoDate.isBefore(currentDate)){
-                System.out.println("Skipped document due to not null 'znění-datum-účinnosti-do' field. " + terminPlatnostDoNode);
-                return;
-            }
-            JsonNode terminPlatnostOdNode =  jsonNode.get("definice-termínu-platnost-vazby-od");
-            if(terminPlatnostOdNode != null && !terminPlatnostOdNode.isNull()){
-              LocalDate terminPlatnostOdDate = LocalDate.parse(terminPlatnostOdNode.asText(),formatter); 
-            if(terminPlatnostOdDate.isAfter(currentDate)){
-                System.out.println("Skipped document due to not null 'znění-datum-účinnosti-do' field. " + terminPlatnostDoNode);
-                return;
-            }
-          }
-         }
-         */
-       }
-
-        if(extracterType == extracterType.PRAVNI_AKT_VAZBA){ 
-            JsonNode zneniCilDokumentID =  jsonNode.get("znění-cíl-dokument-id");    
-            JsonNode firstFragment = jsonNode.path("znění-fragment-cíl").path(0);
-            JsonNode firstZneniDokumentID = firstFragment.path("znění-dokument-id");
-            
-            
-            if(!uniqueIds.contains(zneniCilDokumentID.asInt()) || !uniqueIds.contains(firstZneniDokumentID.asInt())){
-                System.out.println("Do not contains: " + zneniCilDokumentID.asInt() + " " + firstZneniDokumentID.asInt());
-                return;
-            }
-              
-            if(zneniCilDokumentID.asInt() == firstZneniDokumentID.asInt()){
-                System.out.println(zneniCilDokumentID.asInt() + " " + firstZneniDokumentID.asInt());
-                return;
-            }
-        }
-
-
-
-        // Convert the JSON object to a BSON Document
-        String jsonString = objectMapper.writeValueAsString(jsonNode);
-        Document document = Document.parse(jsonString);
-                 
-        if(extracterType == ExtracterType.TERMIN_VAZBA){
-            
-            Document vazba = new Document();
-            int terminID;
-            int terminDefiniceID;
-            try{
-                terminID = stringParser.extractIdAfterLastSlashAsInt(getValueFromField(document,"cvs-termín", "iri"));   
-                terminDefiniceID = stringParser.extractIdAfterLastSlashAsInt(getValueFromField(document,"cvs-definice-termínu", "iri"));
-            }
-            catch (Exception ex){
-                return;
-            }
-
-            vazba.append("termín-id", terminID);
-            vazba.append("definice-termínu-id", terminDefiniceID);
-            InsertOneResult result = collection.insertOne(vazba);
-        }
-        else{
-            InsertOneResult result = collection.insertOne(document);
-        }
-
-        // Insert the document into MongoDB
-        
-   }
     
-       private static void createIndexes(MongoCollection<Document> collection,String indexName) {
-        try {
-            // Create an ascending index on "znění-base-id"
-            collection.createIndex(Indexes.ascending(indexName));
-           // logger.info("Created index on 'znění-base-id'.");
-        } catch (Exception e) {
-            logger.error("Error creating indexes: {}", e.getMessage());
-            throw new RuntimeException("Failed to create indexes.", e);
-        }
-    }
+    
+    
+
+    private Document parseSingleDocument(JsonParser jsonParser, ObjectMapper objectMapper, ExtracterType extracterType, Set<Integer> uniqueIds) throws IOException {
+       // Read the JSON object into a tree model
+       JsonNode jsonNode = objectMapper.readTree(jsonParser);
+
+       // Filtering logic based on ExtracterType
+       if (extracterType == ExtracterType.TERMIN_NAZEV) {
+           // Moved index creation outside
+       }
+
+       if (extracterType == ExtracterType.TERMIN_VAZBA) {
+           // Moved index creation outside
+       }
+
+       if (extracterType == ExtracterType.PRAVNI_AKT) {
+           JsonNode zneniDatumUcinostiDoNode = jsonNode.get("znění-datum-účinnosti-do");
+           JsonNode zneniDatumUcinostiOdNode = jsonNode.get("znění-datum-účinnosti-od");
+           JsonNode metadataDatumZruseniNode = jsonNode.get("metadata-datum-zrušení");
+           LocalDate currentDate = LocalDate.now();
+
+           if (zneniDatumUcinostiOdNode != null) {
+               LocalDate zneniDatumUcinostiOd = LocalDate.parse(zneniDatumUcinostiOdNode.asText(), formatter);
+               if (zneniDatumUcinostiOd.isAfter(currentDate)) {
+                   // Skip this document
+                   return null;
+               }
+           }
+
+           if (zneniDatumUcinostiDoNode != null && !zneniDatumUcinostiDoNode.isNull()) {
+               LocalDate zneniDatumUcinostiDo = LocalDate.parse(zneniDatumUcinostiDoNode.asText(), formatter);
+               if (zneniDatumUcinostiDo.isBefore(currentDate)) {
+                   // Skip this document
+                   return null;
+               }
+           }
+
+           if (metadataDatumZruseniNode != null && !metadataDatumZruseniNode.isNull()) {
+               LocalDate metadataDatumZruseni = LocalDate.parse(metadataDatumZruseniNode.asText(), formatter);
+               if (metadataDatumZruseni.isBefore(currentDate)) {
+                   // Skip this document
+                   return null;
+               }
+           }
+
+           // Additional PRAVNI_AKT logic if needed...
+
+       } else if (extracterType == ExtracterType.TERMIN_DEFINICE) {
+           // Moved index creation outside
+           LocalDate currentDate = LocalDate.now();
+           JsonNode terminPlatnostDoNode = jsonNode.get("definice-termínu-platnost-vazby-do");
+           // Filtering logic if needed...
+       }
+
+       if (extracterType == ExtracterType.PRAVNI_AKT_VAZBA) {
+           JsonNode zneniCilDokumentID = jsonNode.get("znění-cíl-dokument-id");
+           JsonNode firstFragment = jsonNode.path("znění-fragment-cíl").path(0);
+           JsonNode firstZneniDokumentID = firstFragment.path("znění-dokument-id");
+           
+           
+           // If both IDs match, skip
+           if (zneniCilDokumentID.asInt() == firstZneniDokumentID.asInt()) {
+               return null;
+           }
+
+           // Ensure both IDs are in uniqueIds
+           if (!uniqueIds.contains(zneniCilDokumentID.asInt()) || !uniqueIds.contains(firstZneniDokumentID.asInt())) {
+               // Skip
+               return null;
+           }
+       }
+
+       // Convert the JSON object to a BSON Document
+       String jsonString = objectMapper.writeValueAsString(jsonNode);
+       Document document = Document.parse(jsonString);
+
+       if (extracterType == ExtracterType.TERMIN_VAZBA) {
+           // Extract and return a specialized document
+           Document vazba = new Document();
+           int terminID;
+           int terminDefiniceID;
+           try {
+               terminID = stringParser.extractIdAfterLastSlashAsInt(getValueFromField(document, "cvs-termín", "iri"));
+               terminDefiniceID = stringParser.extractIdAfterLastSlashAsInt(getValueFromField(document, "cvs-definice-termínu", "iri"));
+           } catch (Exception ex) {
+               return null; // Skip if we can’t extract IDs
+           }
+           vazba.append("termín-id", terminID);
+           vazba.append("definice-termínu-id", terminDefiniceID);
+           return vazba;
+       }
+
+       return document; // Return the prepared document
+   }
        
        
    public static String getValueFromField(Document document, String fieldName, String key){
