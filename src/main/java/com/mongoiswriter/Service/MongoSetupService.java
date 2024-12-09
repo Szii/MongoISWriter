@@ -15,6 +15,7 @@ import com.mongodb.client.result.UpdateResult;
 import com.mongoiswriter.Configuration.DataSourceConfig;
 import com.mongoiswriter.Configuration.MongoConfig;
 import com.mongoiswriter.Configuration.ProcessConfig;
+import com.mongoiswriter.Enum.ExtracterType;
 import com.mongoiswriter.Enum.VztazenyTermin;
 import com.mongoiswriter.Model.Segments;
 import okhttp3.*;
@@ -62,8 +63,9 @@ public class MongoSetupService {
     private final MongoConfig mongoConfig;
     private final ProcessConfig processingConfig;
     private final DataSourceConfig dataSourceConfig;
+    private final JsonExtracterUtil jsonExtracterUtil;
     
-    public MongoSetupService(MongoUtils mongoUtils, StringParser stringParser, SegmentsExtractionUtil segmentsExtractionUtil, DocumentFetcher documentFetcher, MongoConfig mongoConfig, ProcessConfig processingConfig,DataSourceConfig dataSourceConfig) {
+    public MongoSetupService(MongoUtils mongoUtils, StringParser stringParser, SegmentsExtractionUtil segmentsExtractionUtil, DocumentFetcher documentFetcher, MongoConfig mongoConfig, ProcessConfig processingConfig,DataSourceConfig dataSourceConfig,JsonExtracterUtil jsonExtracterUtil) {
         this.mongoUtils = mongoUtils;
         this.stringParser = stringParser;
         this.segmentsExtractionUtil = segmentsExtractionUtil;
@@ -71,13 +73,29 @@ public class MongoSetupService {
         this.mongoConfig = mongoConfig;
         this.processingConfig = processingConfig;
         this.dataSourceConfig = dataSourceConfig;
+        this.jsonExtracterUtil = jsonExtracterUtil;
     }
     
-    public void setupMongo() throws MalformedURLException, SocketException {
+    public void setupMongo() throws MalformedURLException, SocketException, IOException {
         
             mongoUtils.setProcessing(true);
+                  setRelationsForCollection();
+                  /*
             try{
-            documentFetcher.fetchDocuments();
+                
+                jsonExtracterUtil.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_ZNENI,mongoConfig.MONGO_COLLECTION_AKTY_ZNENI,ExtracterType.PRAVNI_AKT);
+                mongoUtils.createCollection(mongoConfig.MONGO_COLLECTION_TERMINY_FINAL);
+                mongoUtils.createCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL);
+                
+                MongoCollection<Document> terminyProcessedCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_TERMINY_FINAL);
+            
+                MongoCollection<Document> zneniCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL);
+                MongoCollection<Document> zneniPravniAktCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_ZNENI);
+                transferNewestDocuments(zneniPravniAktCollection,zneniCollection);
+                
+                jsonExtracterUtil.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_VAZBA,mongoConfig.MONGO_COLLECTION_AKTY_VAZBA,ExtracterType.PRAVNI_AKT_VAZBA);
+
+          
             }
             catch(SocketException e){
                 throw new SocketException("Socket exception. Cannot open socket");
@@ -85,23 +103,7 @@ public class MongoSetupService {
             catch(MalformedURLException e){
                 throw new MalformedURLException("URL exception. URL is not correct");
             }
-            mongoUtils.createCollection(mongoConfig.MONGO_COLLECTION_TERMINY_FINAL);
-            mongoUtils.createCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL);
-            
-                     
-         //   MongoCollection<Document> terminyBaseCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_TERMINY_BASE);
-          //  MongoCollection<Document> terminyPopisCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_TERMINY_POPIS);
-         //   MongoCollection<Document> terminyVazbaCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_TERMINY_VAZBA);
-            MongoCollection<Document> terminyProcessedCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_TERMINY_FINAL);
-            
-            MongoCollection<Document> zneniCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL);
-            MongoCollection<Document> zneniPravniAktCollection = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_ZNENI);
-    
-            transferNewestDocuments(zneniPravniAktCollection,zneniCollection);
-            
-         //  processTerminDocuments(terminyProcessedCollection,terminyBaseCollection,terminyVazbaCollection,terminyPopisCollection); 
-         
-          //  processZneniDocuments(zneniCollection,zneniPravniAktCollection,terminyProcessedCollection); 
+*/
             mongoUtils.setProcessing(false);
         
     }
@@ -135,7 +137,8 @@ public class MongoSetupService {
         }
     }
     
-    public void startTransfer(Set<Integer> uniqueIds,MongoCollection<Document> sourceCollection, MongoCollection<Document> targetCollection) throws InterruptedException {
+    public void startTransfer(MongoCollection<Document> sourceCollection, MongoCollection<Document> targetCollection) throws InterruptedException {
+        Set<Integer> uniqueIds = mongoUtils.getListOfUniqueZnenBaseIDsForCollection(sourceCollection);
         ExecutorService executor = Executors.newFixedThreadPool(processingConfig.THREAD_NUMBER);
         uniqueIds.forEach(dokumentId -> {
             executor.submit(() -> processDocument(dokumentId,sourceCollection,targetCollection));
@@ -166,8 +169,11 @@ public class MongoSetupService {
             }
             List<VztazenyTermin> vztazeneTerminy = null;
 
-            String pdfId = fetchIdWithRetry(zneniDokumentId, "PDF");
-            String docxId = fetchIdWithRetry(zneniDokumentId, "DOCX");
+           // String pdfId = fetchIdWithRetry(zneniDokumentId, "PDF");
+           // String docxId = fetchIdWithRetry(zneniDokumentId, "DOCX");
+           
+           String docxId = null;
+           String pdfId = null;
 
             Document newDoc = createZneniDocument(zneniDokumentId, zneniBaseId, aktNazevVyhlasen,
                     cisEsbTypZneniPolozka, zneniDatumUcinnostiOdStr, pdfId, docxId,
@@ -176,23 +182,87 @@ public class MongoSetupService {
             targetCollection.insertOne(newDoc);
         }
     }
+    
+    private void setRelationsForCollection() {
+        MongoCollection<Document> collection1 = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL);
+        MongoCollection<Document> collection2 = mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_VAZBA);
+
+        try {
+            System.out.println("Size: " + collection1.countDocuments());
+
+            // Create a fixed thread pool for parallel processing
+            ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+
+            // Use batching to process multiple documents at once
+            int batchSize = 100; // Adjust batch size based on available memory and workload
+            Set<Document> batch = new HashSet<>(batchSize);
+
+            for (Document doc1 : collection1.find()) {
+                batch.add(doc1);
+                if (batch.size() >= batchSize) {
+                    Set<Document> batchCopy = new HashSet<>(batch);
+                    batch.clear();
+                    executor.submit(() -> processBatch(batchCopy, collection1, collection2));
+                }
+            }
+
+            // Process any remaining documents in the last batch
+            if (!batch.isEmpty()) {
+                executor.submit(() -> processBatch(batch, collection1, collection2));
+            }
+
+            // Shut down the executor service gracefully
+            executor.shutdown();
+            while (!executor.isTerminated()) {
+                // Wait for all tasks to complete
+            }
+
+            System.out.println("All documents processed.");
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private void processBatch(Set<Document> batch, MongoCollection<Document> collection1, MongoCollection<Document> collection2) {
+        try {
+            Map<Integer, Set<Document>> batchUpdates = new HashMap<>();
+
+            // Prepare batch updates
+            for (Document doc1 : batch) {
+                Integer dokumentId = doc1.getInteger("znění-dokument-id");
+                Set<Document> matchingDocs = new HashSet<>();
+
+                // Query the second collection for matching documents
+                collection2.find(Filters.eq("znění-cíl-dokument-id", dokumentId))
+                        .forEach(doc2 -> {
+                            Document fragmentZdroj = doc2.get("znění-fragment-zdroj", Document.class);
+                            if (fragmentZdroj != null) {
+                                Integer zneniDokumentId = fragmentZdroj.getInteger("znění-dokument-id");
+                                matchingDocs.add(new Document("vztažené-znění-dokument-id", zneniDokumentId));
+                            }
+                        });
+
+                batchUpdates.put(dokumentId, matchingDocs);
+            }
+
+            // Perform batch updates
+            for (Map.Entry<Integer, Set<Document>> entry : batchUpdates.entrySet()) {
+                collection1.updateOne(
+                        Filters.eq("znění-dokument-id", entry.getKey()), // Match by "znění-dokument-id"
+                        Updates.set("odkazován-v", entry.getValue())     // Add matching documents
+                );
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing batch: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
 
     
      public void transferNewestDocuments(MongoCollection<Document> sourceCollection, MongoCollection<Document> targetCollection) {
-        Set<Integer> uniqueIds = new HashSet<>();
-        try (MongoCursor<Document> cursor = sourceCollection.find().iterator()) {
-            int idCount = 0;
-            while (cursor.hasNext() && (idCount <= dataSourceConfig.DOCUMENTS_NUMBER)) {
-                Document doc = cursor.next();
-                Integer dokumentId = doc.getInteger("znění-base-id");
-                if (dokumentId != null) {
-                    uniqueIds.add(dokumentId);
-                    idCount++;
-                }
-            }
-        }
         try {
-            startTransfer(uniqueIds,sourceCollection,targetCollection);
+            startTransfer(sourceCollection,targetCollection);
         } catch (InterruptedException ex) {
             java.util.logging.Logger.getLogger(MongoSetupService.class.getName()).log(Level.SEVERE, null, ex);
         }                        
@@ -375,11 +445,9 @@ public class MongoSetupService {
                 .append("akt-plné-označení",aktCitace)
                 .append("typ-aktu", podTyp)
                 .append("cis-esb-typ-znění-po", cisEsbTypZneniPoložka)
-                .append("znění-datum-účinnosti-od", zneniDatumUcinnostiOdStr)
-                .append("termíny-vztažené", createArrayContainingTerms(terminy))
-                .append("dokument-stažení-pdf", pdfId)
-                .append("dokument-stažení-docx", docxId);
-                
+                .append("znění-datum-účinnosti-od", zneniDatumUcinnostiOdStr);
+
+        /*        
 
         if (pdfId != null) {
             doc.append("odkaz-stažení-pdf", "https://www.e-sbirka.cz/souborove-sluzby/soubory/" + pdfId);
@@ -393,7 +461,7 @@ public class MongoSetupService {
         else{
            doc.append("odkaz-stažení-docx", null);  
         }
-
+        */
         return doc;
     }
    

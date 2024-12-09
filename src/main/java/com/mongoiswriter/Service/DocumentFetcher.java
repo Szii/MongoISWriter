@@ -34,13 +34,18 @@ public  class DocumentFetcher {
         this.dataSourceConfig = dataSourceConfig;
     }
     
-    public  void fetchDocuments() throws MalformedURLException, SocketException{
+    public  void fetchDocuments() throws MalformedURLException, SocketException, IOException{
+        
+        System.out.println("Fetch documents started");
           
         jsonExtracter.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_ZNENI,mongoConfig.MONGO_COLLECTION_AKTY_ZNENI,ExtracterType.PRAVNI_AKT);
        // jsonExtracter.extractFromAddressToMongo(dataSourceConfig.URL_TERMINY_POPIS, mongoConfig.MONGO_COLLECTION_TERMINY_POPIS,ExtracterType.TERMIN_DEFINICE);
        // jsonExtracter.extractFromAddressToMongo(dataSourceConfig.URL_TERMINY_BASE, mongoConfig.MONGO_COLLECTION_TERMINY_BASE,ExtracterType.TERMIN_NAZEV);
-       // jsonExtracter.extractFromAddressToMongo(dataSourceConfig.URL_TERMINY_VAZBA,  mongoConfig.MONGO_COLLECTION_TERMINY_VAZBA ,ExtracterType.TERMIN_VAZBA);
+        //jsonExtracter.extractFromAddressToMongo(dataSourceConfig.URL_TERMINY_VAZBA,  mongoConfig.MONGO_COLLECTION_TERMINY_VAZBA ,ExtracterType.TERMIN_VAZBA);
+        //jsonExtracter.extractFromAddressToMongo(dataSourceConfig.URL_AKTY_VAZBA, mongoConfig.MONGO_COLLECTION_AKTY_VAZBA ,ExtracterType.PRAVNI_AKT_VAZBA);
         //jsonExtracter.extractFromAddressToMongo(DATA_FRAGMENT_URL,  SOURCE_FRAGMENT_COLLECTION_NAME ,ExtracterType.NONE);
     }
+    
+    
     
 }

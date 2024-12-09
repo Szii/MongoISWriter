@@ -14,6 +14,7 @@ public enum ExtracterType {
     TERMIN_NAZEV,
     TERMIN_DEFINICE,
     TERMIN_VAZBA,
+    PRAVNI_AKT_VAZBA,
     NONE
     
 }

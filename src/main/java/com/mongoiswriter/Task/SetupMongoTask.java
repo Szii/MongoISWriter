@@ -6,6 +6,7 @@
 package com.mongoiswriter.Task;
 
 import com.mongoiswriter.Service.MongoSetupService;
+import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.SocketException;
 import java.util.logging.Level;
@@ -35,6 +36,8 @@ public class SetupMongoTask {
             mongoSetupService.setupMongo();
         } catch (MalformedURLException | SocketException ex) {
             System.out.println("Error when running mongo setup");
+            Logger.getLogger(SetupMongoTask.class.getName()).log(Level.SEVERE, null, ex);
+        } catch (IOException ex) {
             Logger.getLogger(SetupMongoTask.class.getName()).log(Level.SEVERE, null, ex);
         } finally {
             System.out.println("Task done, exiting");

@@ -26,6 +26,8 @@ public class DataSourceConfig {
     public String URL_TERMINY_VAZBA;
     @Value("${sbirka.url.akty.zneni}")
     public String URL_AKTY_ZNENI; 
+    @Value("${sbirka.url.akty.vazba}")
+    public String URL_AKTY_VAZBA; 
     @Value("${sbirka.documents.number}")
     public int DOCUMENTS_NUMBER;
 }

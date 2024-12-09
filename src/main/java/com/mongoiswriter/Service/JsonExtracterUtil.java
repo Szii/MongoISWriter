@@ -11,25 +11,34 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.mongodb.MongoException;
 import com.mongodb.WriteConcern;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Indexes;
+import com.mongodb.client.model.Sorts;
 import com.mongodb.client.result.InsertOneResult;
+import com.mongoiswriter.Configuration.MongoConfig;
 import com.mongoiswriter.Enum.ExtracterType;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.SocketException;
+import java.net.URI;
 import java.net.URL;
+import java.net.URLConnection;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.zip.GZIPInputStream;
 import org.bson.Document;
 import org.slf4j.Logger;
@@ -50,32 +59,38 @@ public class JsonExtracterUtil {
        private final MongoUtils mongoUtils;
        private final StringParser stringParser; 
        private final ObjectMapper objectMapper;
+       private final MongoConfig mongoConfig;
+       
+       private Set<Integer> uniqueIds;
               
-       public JsonExtracterUtil(MongoDatabase database,MongoUtils mongoUtils,StringParser stringParser,ObjectMapper objectMapper){
+       public JsonExtracterUtil(MongoDatabase database,MongoUtils mongoUtils,StringParser stringParser,ObjectMapper objectMapper, MongoConfig mongoConfig){
            this.database = database;
            this.mongoUtils = mongoUtils;
            this.stringParser = stringParser;
            this.objectMapper = objectMapper;
+           this.mongoConfig = mongoConfig;
        }
 
-    public  void extractFromAddressToMongo(String sourceURL, String collectionName,ExtracterType extracterType)throws MalformedURLException, SocketException {  
+    public  void extractFromAddressToMongo(String sourceURL, String collectionName,ExtracterType extracterType)throws MalformedURLException, SocketException, IOException {  
         JsonFactory jsonFactory = new JsonFactory();
+        mongoUtils.createCollection(collectionName);
+        MongoCollection<Document> collection = database.getCollection(collectionName);
+        collection = collection.withWriteConcern(WriteConcern.MAJORITY);            
+        uniqueIds = mongoUtils.getListOfUniqueZnenDokumentIDsForCollection(mongoUtils.getMongoCollection(mongoConfig.MONGO_COLLECTION_AKTY_FINAL));
+        URL url = new URL(sourceURL);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+        connection.setConnectTimeout(6000000); // 1 minute
+        connection.setReadTimeout(60000000);  // 10 minutes
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36");
+        connection.setRequestProperty("Accept", "*/*");
+        connection.setRequestProperty("Connection", "keep-alive");
+        connection.setRequestProperty("Range", "bytes=0-");
+        try (InputStream urlInputStream = connection.getInputStream();
+             BufferedInputStream bufferedInputStream = new BufferedInputStream(urlInputStream, 100 * 1024);
+             GZIPInputStream gzipInputStream = new GZIPInputStream(bufferedInputStream);
+             JsonParser jsonParser = jsonFactory.createParser(gzipInputStream)) {
 
-        // Create MongoDB client
-   
-            // Get database and collection
-            mongoUtils.createCollection(collectionName);
-            MongoCollection<Document> collection = database.getCollection(collectionName);
-            collection = collection.withWriteConcern(WriteConcern.MAJORITY);                  
-
-            // Open a connection to the URL and get the InputStream
-            URL url = new URL(sourceURL);
-            try (InputStream urlInputStream = url.openStream();
-                 BufferedInputStream bufferedInputStream = new BufferedInputStream(urlInputStream, 8192 * 100); 
-                 GZIPInputStream gzipInputStream = new GZIPInputStream(bufferedInputStream);
-                 JsonParser jsonParser = jsonFactory.createParser(gzipInputStream)) {
-
-                // Start parsing the JSON content
                 JsonToken token = jsonParser.nextToken();
 
                 if (token == JsonToken.START_OBJECT) {
@@ -90,7 +105,7 @@ public class JsonExtracterUtil {
                 System.out.println("Import completed successfully.");
 
             } catch (IOException e) {
-                System.out.println("Source size" + mongoUtils.getCollectionSize(collectionName));
+                System.out.println("Source size " + mongoUtils.getCollectionSize(collectionName));
                 System.err.println("IOException occurred: " + e.getMessage());
                 mongoUtils.setProcessing(false);
                 e.printStackTrace();
@@ -178,8 +193,25 @@ public class JsonExtracterUtil {
                             //   System.out.println("Skipped document due to not null 'metadata-datum-zrušení' field." + metadataDatumZruseniNode);
                                 return;
                           }
-                     }                  
-        }
+                     } 
+            
+        /*    
+       
+            Optional.ofNullable(
+                    collection.find(Filters.eq("znění-base-id", jsonNode.get("znění-base-id").asText()))
+                              .sort(Sorts.descending("znění-datum-účinnosti-od"))
+                              .first()
+            ).ifPresent(doc -> {
+                LocalDate foundDate = LocalDate.parse(doc.getString("znění-datum-účinnosti-od"), formatter);
+                LocalDate newDate = LocalDate.parse(jsonNode.get("znění-datum-účinnosti-od").asText(), formatter);
+
+                if (foundDate.isBefore(newDate)) {
+                    collection.replaceOne(Filters.eq("znění-base-id", doc.getString("znění-base-id")),
+                            Document.parse(jsonNode.toString()));
+                }
+            });
+          */
+       }
        if(extracterType == ExtracterType.TERMIN_DEFINICE){
            createIndexes(collection, "definice-termínu-id");
            LocalDate currentDate = LocalDate.parse(LocalDate.now().toString(),formatter);
@@ -202,13 +234,30 @@ public class JsonExtracterUtil {
          }
          */
        }
-          
+
+        if(extracterType == extracterType.PRAVNI_AKT_VAZBA){ 
+            JsonNode zneniCilDokumentID =  jsonNode.get("znění-cíl-dokument-id");    
+            JsonNode firstFragment = jsonNode.path("znění-fragment-cíl").path(0);
+            JsonNode firstZneniDokumentID = firstFragment.path("znění-dokument-id");
+            
+            
+            if(!uniqueIds.contains(zneniCilDokumentID.asInt()) || !uniqueIds.contains(firstZneniDokumentID.asInt())){
+                System.out.println("Do not contains: " + zneniCilDokumentID.asInt() + " " + firstZneniDokumentID.asInt());
+                return;
+            }
+              
+            if(zneniCilDokumentID.asInt() == firstZneniDokumentID.asInt()){
+                System.out.println(zneniCilDokumentID.asInt() + " " + firstZneniDokumentID.asInt());
+                return;
+            }
+        }
+
+
 
         // Convert the JSON object to a BSON Document
         String jsonString = objectMapper.writeValueAsString(jsonNode);
         Document document = Document.parse(jsonString);
-        
-           
+                 
         if(extracterType == ExtracterType.TERMIN_VAZBA){
             
             Document vazba = new Document();

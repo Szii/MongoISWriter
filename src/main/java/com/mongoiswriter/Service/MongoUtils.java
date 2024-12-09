@@ -12,8 +12,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.mongodb.MongoCommandException;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.MongoIterable;
+import java.util.HashSet;
+import java.util.Set;
 import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,7 +57,7 @@ public class MongoUtils {
       public  boolean createCollection(String collectionName) {
         try {
             // Check if the collection already exists
-             dropCollectionIfExists(collectionName);
+            dropCollectionIfExists(collectionName);
             logger.info("Collection '{}' created successfully.", collectionName);
             return true;
         } catch (MongoCommandException e) {
@@ -173,7 +176,41 @@ public JsonNode getMongoCollectionAsJson(String collectionName) throws JsonProce
      public Integer getCollectionSize(String collection) {
         return (int) getMongoCollection(collection).countDocuments();
     }
-                  
-    
+     
+     
+    public Set<Integer> getListOfUniqueZnenBaseIDsForCollection(MongoCollection<Document> sourceCollection){
+        Set<Integer> uniqueIds = new HashSet<>();
+        try (MongoCursor<Document> cursor = sourceCollection.find().iterator()) {
+            int idCount = 0;
+            while (cursor.hasNext()) {
+                Document doc = cursor.next();
+                Integer dokumentId = doc.getInteger("znění-base-id");
+                if (dokumentId != null) {
+                    uniqueIds.add(dokumentId);
+                    idCount++;
+                }
+            }
+        }
+        
+        return uniqueIds;
+    }
+        
+        
+     public Set<Integer> getListOfUniqueZnenDokumentIDsForCollection(MongoCollection<Document> sourceCollection){
+        Set<Integer> uniqueIds = new HashSet<>();
+        try (MongoCursor<Document> cursor = sourceCollection.find().iterator()) {
+            int idCount = 0;
+            while (cursor.hasNext()) {
+                Document doc = cursor.next();
+                Integer dokumentId = doc.getInteger("znění-dokument-id");
+                if (dokumentId != null) {
+                    uniqueIds.add(dokumentId);
+                    idCount++;
+                }
+            }
+        }
+        
+        return uniqueIds;
+    }
        
 }
